@@ -70,6 +70,15 @@ if (!process.env.DISCORD_TOKEN) {
 }
 
 client.login(process.env.DISCORD_TOKEN).catch(err => {
-  logger.error('Failed to login:', err.message);
+  if (err.message?.includes('disallowed intents')) {
+    logger.error(
+      'LOGIN FAILED — Privileged Intents are not enabled.\n' +
+      '  → Go to discord.com/developers/applications → Bot\n' +
+      '  → Enable "Server Members Intent" and "Message Content Intent"\n' +
+      '  → Save Changes, then restart the bot.'
+    );
+  } else {
+    logger.error('Failed to login:', err.message);
+  }
   process.exit(1);
 });
