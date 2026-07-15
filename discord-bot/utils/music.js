@@ -1,13 +1,5 @@
 /**
- * Music utilities — thin wrapper around @discordjs/voice + yt-dlp-exec.
- *
- * Queue shape per guild:
- *  {
- *    voiceChannel, textChannel, connection, player,
- *    tracks: [{ title, url, requestedBy }],
- *    playing: boolean,
- *    volume: number (0–1),
- *  }
+ * Music utilities — @discordjs/voice + play-dl (pure JS, no Python needed).
  */
 const {
   createAudioPlayer,
@@ -18,52 +10,37 @@ const {
   entersState,
   StreamType,
 } = require('@discordjs/voice');
-const ytdlp   = require('yt-dlp-exec');
-const { PassThrough } = require('stream');
+const playdl   = require('play-dl');
 const { logger } = require('./logger');
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 async function getTrackInfo(query) {
   const isUrl = /^https?:\/\//.test(query);
-  const searchQuery = isUrl ? query : `ytsearch1:${query}`;
 
-  const info = await ytdlp(searchQuery, {
-    dumpSingleJson: true,
-    noWarnings: true,
-    noCallHome: true,
-    noCheckCertificate: true,
-    preferFreeFormats: true,
-    youtubeSkipDashManifest: true,
-  });
-
-  const entry = info.entries ? info.entries[0] : info;
-  return {
-    title:  entry.title  ?? 'Unknown',
-    url:    entry.webpage_url ?? entry.url ?? query,
-    duration: entry.duration ?? 0,
-  };
+  if (isUrl) {
+    const info = await playdl.video_info(query);
+    return {
+      title:    info.video_details.title  ?? 'Unknown',
+      url:      info.video_details.url,
+      duration: info.video_details.durationInSec ?? 0,
+    };
+  } else {
+    const results = await playdl.search(query, { source: { youtube: 'video' }, limit: 1 });
+    if (!results.length) throw new Error('No results found.');
+    const v = results[0];
+    return { title: v.title ?? 'Unknown', url: v.url, duration: v.durationInSec ?? 0 };
+  }
 }
 
-function createStream(url) {
-  const pass = new PassThrough();
-  ytdlp.exec(url, {
-    output: '-',
-    format: 'bestaudio[ext=webm]/bestaudio/best',
-    noWarnings: true,
-    quiet: true,
-  }, { stdio: ['ignore', 'pipe', 'ignore'] })
-    .then(proc => proc.stdout.pipe(pass))
-    .catch(err => {
-      logger.error('yt-dlp stream error:', err.message);
-      pass.destroy(err);
-    });
-  return pass;
+async function createStream(url) {
+  const stream = await playdl.stream(url, { quality: 2 });
+  return stream;
 }
 
 // ── Queue management ─────────────────────────────────────────────────────────
 
-function playNext(guildId, musicQueue) {
+async function playNext(guildId, musicQueue) {
   const queue = musicQueue.get(guildId);
   if (!queue) return;
 
@@ -82,16 +59,22 @@ function playNext(guildId, musicQueue) {
 
   const track = queue.tracks.shift();
   queue.playing = true;
-
-  const stream   = createStream(track.url);
-  const resource = createAudioResource(stream, {
-    inputType: StreamType.Arbitrary,
-    inlineVolume: true,
-  });
-  resource.volume?.setVolume(queue.volume ?? 0.5);
-
-  queue.player.play(resource);
   queue.currentTrack = track;
+
+  try {
+    const stream   = await createStream(track.url);
+    const resource = createAudioResource(stream.stream, {
+      inputType: stream.type,
+      inlineVolume: true,
+    });
+    resource.volume?.setVolume(queue.volume ?? 0.5);
+    queue.player.play(resource);
+  } catch (err) {
+    logger.error('Stream error:', err.message);
+    queue.playing = false;
+    // Try next track
+    return playNext(guildId, musicQueue);
+  }
 
   queue.textChannel?.send({
     embeds: [{
@@ -164,7 +147,7 @@ async function joinAndPlay(interaction, query, musicQueue) {
   queue.tracks.push(trackInfo);
 
   if (!queue.playing) {
-    playNext(interaction.guildId, musicQueue);
+    await playNext(interaction.guildId, musicQueue);
     await interaction.editReply({
       embeds: [{
         color: 0x5865F2,
