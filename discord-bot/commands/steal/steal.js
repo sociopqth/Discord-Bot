@@ -179,7 +179,23 @@ module.exports = {
         }
 
         const json = await res.json();
-        logger.info(`steal: API response ${res.status}: ${JSON.stringify(json).slice(0, 200)}`);
+        logger.info(`steal: API response ${res.status} for ${name}`);
+
+        // Rate limited — bail immediately with a clear retry time
+        if (res.status === 429) {
+          const secs  = Math.ceil(json.retry_after ?? 60);
+          const mins  = Math.ceil(secs / 60);
+          const until = new Date(Date.now() + secs * 1000);
+          const hh    = until.getHours().toString().padStart(2, '0');
+          const mm    = until.getMinutes().toString().padStart(2, '0');
+          logger.warn(`steal: rate limited for ${secs}s`);
+          return message.reply(
+            `⏳ **Discord is rate-limiting emoji creation for this server.**\n` +
+            `Please wait **${mins} minute${mins !== 1 ? 's' : ''}** and try again.\n` +
+            `> You can retry after **${hh}:${mm}**.\n\n` +
+            `*(This happened because of repeated attempts while debugging — it will clear on its own.)*`
+          );
+        }
 
         if (!res.ok) throw new Error(`Discord API ${res.status}: ${json.message ?? JSON.stringify(json)}`);
 
