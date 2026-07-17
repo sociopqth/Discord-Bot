@@ -104,13 +104,15 @@ module.exports = {
     logger.info(`steal: ${candidates.size} emoji candidate(s) found`);
 
     // ── Emoji slot check ─────────────────────────────────────────────────────
-    const maxEmojis    = message.guild.maximumEmojis ?? 50;
+    // Boost tier determines the emoji cap: 0→50, 1→100, 2→150, 3→250
+    const EMOJI_LIMITS = { 0: 50, 1: 100, 2: 150, 3: 250 };
+    const maxEmojis    = EMOJI_LIMITS[message.guild.premiumTier] ?? 50;
     const usedStatic   = message.guild.emojis.cache.filter(e => !e.animated).size;
     const usedAnimated = message.guild.emojis.cache.filter(e =>  e.animated).size;
     let slotsStatic    = maxEmojis - usedStatic;
     let slotsAnimated  = maxEmojis - usedAnimated;
 
-    logger.info(`steal: slots — static ${slotsStatic}/${maxEmojis}, animated ${slotsAnimated}/${maxEmojis}`);
+    logger.info(`steal: tier=${message.guild.premiumTier} max=${maxEmojis} slots — static ${slotsStatic}, animated ${slotsAnimated}`);
 
     // If both slot types are full, bail early with one clear message
     if (slotsStatic <= 0 && slotsAnimated <= 0) {

@@ -17,7 +17,8 @@ module.exports = {
 
     // ── slots ────────────────────────────────────────────────────────────────
     if (!sub || sub === 'slots') {
-      const max      = message.guild.maximumEmojis ?? 50;
+      const EMOJI_LIMITS = { 0: 50, 1: 100, 2: 150, 3: 250 };
+      const max      = EMOJI_LIMITS[message.guild.premiumTier] ?? 50;
       const statics  = message.guild.emojis.cache.filter(e => !e.animated).size;
       const animated = message.guild.emojis.cache.filter(e =>  e.animated).size;
       return message.reply(
