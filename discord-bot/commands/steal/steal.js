@@ -7,10 +7,13 @@
  *
  * Both modes can be combined (reply + emojis in command).
  */
-const { PermissionFlagsBits } = require('discord.js');
+const { PermissionFlagsBits, REST, Routes } = require('discord.js');
 const https = require('https');
 const http  = require('http');
 const { logger } = require('../../utils/logger');
+
+// Use the REST API directly — guild.emojis.create() hangs on Replit
+const rest = new REST().setToken(process.env.DISCORD_TOKEN);
 
 // Custom emoji pattern: <:name:id> or <a:name:id>
 const EMOJI_RE = /<(a)?:(\w{2,32}):(\d{15,20})>/g;
@@ -151,20 +154,22 @@ module.exports = {
       }
 
       try {
-        // Fetch image buffer (15s timeout for the HTTP download only)
+        // Fetch image buffer (15s timeout)
         const buf = await withTimeout(fetchBuffer(emojiUrl), 15_000, `Download timed out for ${name}`);
         logger.info(`steal: buffer ${name} = ${buf.length} bytes`);
 
-        // No timeout on emojis.create — Discord.js handles rate limits internally
-        const created = await message.guild.emojis.create({
-          attachment: buf,
-          name,
+        // Convert to base64 data URI and POST directly to the REST API
+        // (guild.emojis.create() hangs indefinitely on this host)
+        const mime    = animated ? 'image/gif' : 'image/png';
+        const dataUri = `data:${mime};base64,${buf.toString('base64')}`;
+
+        const created = await rest.post(Routes.guildEmojis(message.guild.id), {
+          body:   { name, image: dataUri },
           reason: `Stolen by ${message.author.tag}`,
         });
 
-        logger.info(`steal: ✅ created ${name}`);
-        if (animated) usedAnimated + 1; else usedEmojis + 1; // track locally (cosmetic)
-        results.push(`✅ \`${created.name}\` ${created}`);
+        logger.info(`steal: ✅ created ${name} id=${created.id}`);
+        results.push(`✅ \`${created.name}\` <${animated ? 'a' : ''}:${created.name}:${created.id}>`);
       } catch (err) {
         logger.error(`steal: failed ${name}: ${err.message}`);
         results.push(`❌ \`${name}\` — ${err.message}`);
