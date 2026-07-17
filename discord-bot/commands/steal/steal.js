@@ -103,51 +103,63 @@ module.exports = {
 
     logger.info(`steal: ${candidates.size} emoji candidate(s) found`);
 
-    // Send a working message so the user knows it's running
-    const workingMsg = await message.reply(`⏳ Stealing ${candidates.size} emoji(s)… please wait.`).catch(() => null);
+    // ── Emoji slot check ─────────────────────────────────────────────────────
+    const maxEmojis   = message.guild.maximumEmojis ?? 50;
+    const usedEmojis  = message.guild.emojis.cache.filter(e => !e.animated).size;
+    const usedAnimated = message.guild.emojis.cache.filter(e => e.animated).size;
+    const slotsStatic   = maxEmojis - usedEmojis;
+    const slotsAnimated = maxEmojis - usedAnimated;
+
+    logger.info(`steal: slots — static ${slotsStatic}/${maxEmojis}, animated ${slotsAnimated}/${maxEmojis}`);
+
+    // Send a working message immediately so the user sees progress
+    const workingMsg = await message.reply(
+      `⏳ Found **${candidates.size}** emoji(s) — adding them now. This may take a moment due to Discord rate limits…`
+    ).catch(() => null);
 
     // ── Process each emoji ───────────────────────────────────────────────────
     const results = [];
 
     for (const { animated, name, id } of candidates.values()) {
+      // Check slot availability
+      const slots = animated ? slotsAnimated : slotsStatic;
+      if (slots <= 0) {
+        results.push(`❌ \`${name}\` — server is full on ${animated ? 'animated' : 'static'} emoji slots (${maxEmojis} max).`);
+        continue;
+      }
+
       const ext      = animated ? 'gif' : 'png';
-      // No query params — the bare CDN URL is most reliable
       const emojiUrl = `https://cdn.discordapp.com/emojis/${id}.${ext}`;
       logger.info(`steal: trying emoji ${name} (${id}) animated=${animated}`);
 
-      // Check if this emoji already exists in the guild
-      const alreadyExists = message.guild.emojis.cache.some(e => e.id === id);
-      if (alreadyExists) {
+      // Skip if already in this guild
+      if (message.guild.emojis.cache.some(e => e.id === id)) {
         results.push(`ℹ️ \`${name}\` is already in this server.`);
         continue;
       }
 
-      let created = null;
-      let lastErr  = null;
-
-      // Download buffer with a 10s timeout, then create emoji
       try {
-        const buf = await withTimeout(fetchBuffer(emojiUrl), 15_000, `Fetch timed out for ${name}`);
-        logger.info(`steal: buffer size for ${name} = ${buf.length} bytes`);
-        created = await withTimeout(
-          message.guild.emojis.create({ attachment: buf, name, reason: `Stolen by ${message.author.tag}` }),
-          90_000,
-          `Discord API timed out creating ${name}`
-        );
+        // Fetch image buffer (15s timeout for the HTTP download only)
+        const buf = await withTimeout(fetchBuffer(emojiUrl), 15_000, `Download timed out for ${name}`);
+        logger.info(`steal: buffer ${name} = ${buf.length} bytes`);
+
+        // No timeout on emojis.create — Discord.js handles rate limits internally
+        const created = await message.guild.emojis.create({
+          attachment: buf,
+          name,
+          reason: `Stolen by ${message.author.tag}`,
+        });
+
         logger.info(`steal: ✅ created ${name}`);
+        if (animated) usedAnimated + 1; else usedEmojis + 1; // track locally (cosmetic)
+        results.push(`✅ \`${created.name}\` ${created}`);
       } catch (err) {
         logger.error(`steal: failed ${name}: ${err.message}`);
-        lastErr = err;
-      }
-
-      if (created) {
-        results.push(`✅ Added ${animated ? '(animated) ' : ''}\`${created.name}\` ${created}`);
-      } else {
-        results.push(`❌ \`${name}\` — ${lastErr?.message ?? 'unknown error'}`);
+        results.push(`❌ \`${name}\` — ${err.message}`);
       }
     }
 
-    // ── Send results in chunks (avoid 2000 char limit) ───────────────────────
+    // ── Send results ─────────────────────────────────────────────────────────
     if (results.length === 0) return;
 
     const chunks = [];
