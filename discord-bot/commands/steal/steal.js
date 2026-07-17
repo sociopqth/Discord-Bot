@@ -103,6 +103,9 @@ module.exports = {
 
     logger.info(`steal: ${candidates.size} emoji candidate(s) found`);
 
+    // Send a working message so the user knows it's running
+    const workingMsg = await message.reply(`⏳ Stealing ${candidates.size} emoji(s)… please wait.`).catch(() => null);
+
     // ── Process each emoji ───────────────────────────────────────────────────
     const results = [];
 
@@ -124,11 +127,11 @@ module.exports = {
 
       // Download buffer with a 10s timeout, then create emoji
       try {
-        const buf = await withTimeout(fetchBuffer(emojiUrl), 10_000, `Fetch timed out for ${name}`);
+        const buf = await withTimeout(fetchBuffer(emojiUrl), 15_000, `Fetch timed out for ${name}`);
         logger.info(`steal: buffer size for ${name} = ${buf.length} bytes`);
         created = await withTimeout(
           message.guild.emojis.create({ attachment: buf, name, reason: `Stolen by ${message.author.tag}` }),
-          10_000,
+          90_000,
           `Discord API timed out creating ${name}`
         );
         logger.info(`steal: ✅ created ${name}`);
