@@ -108,8 +108,9 @@ module.exports = {
 
     for (const { animated, name, id } of candidates.values()) {
       const ext      = animated ? 'gif' : 'png';
-      const emojiUrl = `https://cdn.discordapp.com/emojis/${id}.${ext}?size=128&quality=lossless`;
-      logger.info(`steal: trying emoji ${name} (${id}) animated=${animated} url=${emojiUrl}`);
+      // No query params — the bare CDN URL is most reliable
+      const emojiUrl = `https://cdn.discordapp.com/emojis/${id}.${ext}`;
+      logger.info(`steal: trying emoji ${name} (${id}) animated=${animated}`);
 
       // Check if this emoji already exists in the guild
       const alreadyExists = message.guild.emojis.cache.some(e => e.id === id);
@@ -118,36 +119,22 @@ module.exports = {
         continue;
       }
 
-      // Try URL first, then buffer fallback
       let created = null;
       let lastErr  = null;
 
-      // Attempt 1: pass URL directly
+      // Download buffer with a 10s timeout, then create emoji
       try {
-        created = await message.guild.emojis.create({
-          attachment: emojiUrl,
-          name,
-          reason: `Stolen by ${message.author.tag}`,
-        });
-        logger.info(`steal: ✅ emoji ${name} created via URL`);
-      } catch (err1) {
-        logger.warn(`steal: URL create failed for ${name}: ${err1.message} — trying buffer`);
-        lastErr = err1;
-
-        // Attempt 2: download buffer
-        try {
-          const buf = await fetchBuffer(emojiUrl);
-          logger.info(`steal: buffer size for ${name} = ${buf.length} bytes`);
-          created = await message.guild.emojis.create({
-            attachment: buf,
-            name,
-            reason: `Stolen by ${message.author.tag}`,
-          });
-          logger.info(`steal: ✅ emoji ${name} created via buffer`);
-        } catch (err2) {
-          logger.error(`steal: buffer create also failed for ${name}: ${err2.message}`);
-          lastErr = err2;
-        }
+        const buf = await withTimeout(fetchBuffer(emojiUrl), 10_000, `Fetch timed out for ${name}`);
+        logger.info(`steal: buffer size for ${name} = ${buf.length} bytes`);
+        created = await withTimeout(
+          message.guild.emojis.create({ attachment: buf, name, reason: `Stolen by ${message.author.tag}` }),
+          10_000,
+          `Discord API timed out creating ${name}`
+        );
+        logger.info(`steal: ✅ created ${name}`);
+      } catch (err) {
+        logger.error(`steal: failed ${name}: ${err.message}`);
+        lastErr = err;
       }
 
       if (created) {
@@ -177,6 +164,14 @@ module.exports = {
     }
   },
 };
+
+// ── Timeout wrapper ──────────────────────────────────────────────────────────
+function withTimeout(promise, ms, msg) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(msg)), ms)),
+  ]);
+}
 
 // ── Buffer fetch with redirect support ──────────────────────────────────────
 function fetchBuffer(url, redirects = 5) {
