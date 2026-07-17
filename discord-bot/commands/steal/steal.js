@@ -1,11 +1,6 @@
 /**
  * Prefix command: c!steal
- *
- * Reply to a message that contains:
- *  - A custom emoji  → adds it to the current guild
- *  - A sticker       → adds it to the current guild (requires Manage Emojis and Stickers)
- *
- * Does NOT handle slash command data/execute — only prefix (run).
+ * Reply to a message with a custom emoji or guild sticker to add it to this server.
  */
 const { PermissionFlagsBits } = require('discord.js');
 const https = require('https');
@@ -16,113 +11,139 @@ module.exports = {
 
   async run(message, args, client) {
     // ── Permission check ─────────────────────────────────────────────────────
-    if (!message.member?.permissions.has(PermissionFlagsBits.ManageGuildExpressions)) {
+    const memberPerms = message.member?.permissions;
+    const botPerms    = message.guild.members.me?.permissions;
+
+    const hasManage = p =>
+      p?.has(PermissionFlagsBits.ManageEmojisAndStickers) ||
+      p?.has(PermissionFlagsBits.ManageGuildExpressions);
+
+    if (!hasManage(memberPerms)) {
       return message.reply('❌ You need the **Manage Emojis and Stickers** permission.');
     }
-    if (!message.guild.members.me?.permissions.has(PermissionFlagsBits.ManageGuildExpressions)) {
+    if (!hasManage(botPerms)) {
       return message.reply('❌ I need the **Manage Emojis and Stickers** permission.');
     }
 
-    // ── Must be a reply ──────────────────────────────────────────────────────
-    const ref = message.reference;
-    if (!ref) {
-      return message.reply('❌ Reply to a message that contains a custom emoji or sticker.');
+    // ── Must be used as a reply ──────────────────────────────────────────────
+    if (!message.reference?.messageId) {
+      return message.reply(
+        '❌ Use this command by **replying** to a message that contains a custom emoji or sticker.\n' +
+        '> Right-click / long-press a message → Reply, then type `c!steal`.'
+      );
     }
 
+    // ── Fetch the target message ─────────────────────────────────────────────
     let target;
     try {
-      target = await message.channel.messages.fetch(ref.messageId);
+      target = await message.channel.messages.fetch(message.reference.messageId);
     } catch {
-      return message.reply('❌ Could not fetch the referenced message.');
+      return message.reply('❌ Could not fetch that message. Make sure I can see this channel.');
     }
 
     const results = [];
 
-    // ── 1. Steal custom emoji(s) from message content ────────────────────────
-    // Matches both static <:name:id> and animated <a:name:id>
-    const emojiRegex = /<(a)?:(\w+):(\d+)>/g;
+    // ── 1. Steal custom emoji(s) from message text ───────────────────────────
+    // Matches <:name:id>  and  <a:name:id>  (animated)
+    const emojiRegex = /<(a)?:(\w{2,32}):(\d{17,20})>/g;
+    const seenIds    = new Set();
     let match;
-    const seenIds = new Set();
 
     while ((match = emojiRegex.exec(target.content)) !== null) {
       const animated = Boolean(match[1]);
       const name     = match[2];
       const id       = match[3];
-
       if (seenIds.has(id)) continue;
       seenIds.add(id);
 
-      const ext = animated ? 'gif' : 'png';
-      const url = `https://cdn.discordapp.com/emojis/${id}.${ext}?size=128&quality=lossless`;
+      // Pass the URL directly — discord.js resolves it internally
+      const ext        = animated ? 'gif' : 'png';
+      const emojiUrl   = `https://cdn.discordapp.com/emojis/${id}.${ext}?size=128&quality=lossless`;
 
       try {
-        const attachment = await fetchBuffer(url);
         const created = await message.guild.emojis.create({
-          attachment,
+          attachment: emojiUrl,
           name,
           reason: `Stolen by ${message.author.tag}`,
         });
-        results.push(`✅ Emoji added: \`${created.name}\` ${created}`);
+        results.push(`✅ Added emoji: \`${created.name}\` ${created}`);
       } catch (err) {
-        results.push(`❌ Failed to add emoji \`${name}\`: ${err.message}`);
+        // Fall back to downloading a buffer if URL approach fails
+        try {
+          const buf     = await fetchBuffer(emojiUrl);
+          const created = await message.guild.emojis.create({
+            attachment: buf,
+            name,
+            reason: `Stolen by ${message.author.tag}`,
+          });
+          results.push(`✅ Added emoji: \`${created.name}\` ${created}`);
+        } catch (err2) {
+          results.push(`❌ Failed to add \`${name}\`: ${err2.message}`);
+        }
       }
     }
 
     // ── 2. Steal sticker(s) ──────────────────────────────────────────────────
     for (const sticker of target.stickers.values()) {
-      // Only guild stickers can be stolen (not Nitro/standard packs)
       if (sticker.guildId === message.guild.id) {
-        results.push(`ℹ️ Sticker \`${sticker.name}\` is already from this server.`);
+        results.push(`ℹ️ \`${sticker.name}\` is already from this server.`);
         continue;
       }
-
-      // Standard pack stickers cannot be cloned
       if (!sticker.guildId) {
-        results.push(`ℹ️ \`${sticker.name}\` is a standard sticker and cannot be added.`);
+        results.push(`ℹ️ \`${sticker.name}\` is a built-in sticker and cannot be copied.`);
         continue;
       }
 
       const stickerUrl = sticker.url;
       if (!stickerUrl) {
-        results.push(`❌ Could not get URL for sticker \`${sticker.name}\`.`);
+        results.push(`❌ Could not get URL for \`${sticker.name}\`.`);
         continue;
       }
 
       try {
-        const buffer = await fetchBuffer(stickerUrl);
+        const buf     = await fetchBuffer(stickerUrl);
         const created = await message.guild.stickers.create({
-          file: buffer,
-          name: sticker.name,
-          tags: sticker.tags ?? sticker.name.slice(0, 200),
-          description: sticker.description ?? `Stolen from ${sticker.guildId}`,
-          reason: `Stolen by ${message.author.tag}`,
+          file:        { attachment: buf, name: `${sticker.name}.png` },
+          name:        sticker.name,
+          tags:        sticker.tags || '🙂',
+          description: sticker.description || `Stolen from another server`,
+          reason:      `Stolen by ${message.author.tag}`,
         });
-        results.push(`✅ Sticker added: \`${created.name}\``);
+        results.push(`✅ Added sticker: \`${created.name}\``);
       } catch (err) {
         results.push(`❌ Failed to add sticker \`${sticker.name}\`: ${err.message}`);
       }
     }
 
     if (results.length === 0) {
-      return message.reply('❌ That message contains no custom emojis or stealable stickers.');
+      return message.reply(
+        '❌ No stealable content found.\n' +
+        '> The message must contain a **custom emoji** (not a standard emoji) or a **guild sticker**.'
+      );
     }
 
     await message.reply(results.join('\n'));
   },
 };
 
-// ── Fetch helper: returns a Buffer from a URL ────────────────────────────────
-function fetchBuffer(url) {
+// ── Buffer fetch with redirect support ──────────────────────────────────────
+function fetchBuffer(url, redirects = 5) {
   return new Promise((resolve, reject) => {
+    if (redirects === 0) return reject(new Error('Too many redirects'));
     const lib = url.startsWith('https') ? https : http;
-    lib.get(url, { headers: { 'User-Agent': 'DiscordBot' } }, res => {
+    lib.get(url, { headers: { 'User-Agent': 'DiscordBot (steal-cmd, 1.0)' } }, res => {
+      // Follow redirects
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+        res.resume();
+        return resolve(fetchBuffer(res.headers.location, redirects - 1));
+      }
       if (res.statusCode !== 200) {
         res.resume();
-        return reject(new Error(`HTTP ${res.statusCode}`));
+        return reject(new Error(`HTTP ${res.statusCode} for ${url}`));
       }
       const chunks = [];
-      res.on('data', c => chunks.push(c));
-      res.on('end',  () => resolve(Buffer.concat(chunks)));
+      res.on('data',  c  => chunks.push(c));
+      res.on('end',   () => resolve(Buffer.concat(chunks)));
       res.on('error', reject);
     }).on('error', reject);
   });
