@@ -1,21 +1,29 @@
 /**
  * Prefix command: c!steal
- * Reply to a message with a custom emoji or guild sticker to add it to this server.
+ *
+ * Two modes:
+ *  1. c!steal               — reply to a message, steals all custom emojis/stickers in it
+ *  2. c!steal <emoji1> ...  — type custom emojis directly in the command message
+ *
+ * Both modes can be combined (reply + emojis in command).
  */
 const { PermissionFlagsBits } = require('discord.js');
 const https = require('https');
 const http  = require('http');
 const { logger } = require('../../utils/logger');
 
+// Custom emoji pattern: <:name:id> or <a:name:id>
+const EMOJI_RE = /<(a)?:(\w{2,32}):(\d{15,20})>/g;
+
 module.exports = {
   prefix: 'steal',
 
   async run(message, args, client) {
+
     // ── Permission check ─────────────────────────────────────────────────────
     const memberPerms = message.member?.permissions;
     const botPerms    = message.guild.members.me?.permissions;
-
-    const hasManage = p =>
+    const hasManage   = p =>
       p?.has(PermissionFlagsBits.ManageEmojisAndStickers) ||
       p?.has(PermissionFlagsBits.ManageGuildExpressions);
 
@@ -26,109 +34,147 @@ module.exports = {
       return message.reply('❌ I need the **Manage Emojis and Stickers** permission.');
     }
 
-    // ── Must be used as a reply ──────────────────────────────────────────────
-    logger.info(`steal: reference = ${JSON.stringify(message.reference)}`);
-    if (!message.reference?.messageId) {
+    // ── Collect emoji candidates ─────────────────────────────────────────────
+    // Map of id → { animated, name, id }
+    const candidates = new Map();
+
+    // Mode 1: emojis typed directly in the c!steal message
+    let m;
+    EMOJI_RE.lastIndex = 0;
+    while ((m = EMOJI_RE.exec(message.content)) !== null) {
+      const [, a, name, id] = m;
+      if (!candidates.has(id)) candidates.set(id, { animated: Boolean(a), name, id });
+    }
+
+    // Mode 2: emojis from the replied-to message
+    if (message.reference?.messageId) {
+      try {
+        const target = await message.channel.messages.fetch(message.reference.messageId);
+        logger.info(`steal: replied message content = "${target.content}"`);
+
+        EMOJI_RE.lastIndex = 0;
+        while ((m = EMOJI_RE.exec(target.content)) !== null) {
+          const [, a, name, id] = m;
+          if (!candidates.has(id)) candidates.set(id, { animated: Boolean(a), name, id });
+        }
+
+        // Stickers from replied message
+        for (const sticker of target.stickers.values()) {
+          logger.info(`steal: found sticker ${sticker.name} guildId=${sticker.guildId}`);
+          if (sticker.guildId === message.guild.id) continue;
+          if (!sticker.guildId) {
+            await message.reply(`ℹ️ \`${sticker.name}\` is a built-in sticker and cannot be copied.`).catch(() => {});
+            continue;
+          }
+          const stickerUrl = sticker.url;
+          if (!stickerUrl) continue;
+          logger.info(`steal: attempting sticker ${sticker.name} from ${stickerUrl}`);
+          try {
+            const buf     = await fetchBuffer(stickerUrl);
+            const created = await message.guild.stickers.create({
+              file:        { attachment: buf, name: `${sticker.name}.png` },
+              name:        sticker.name,
+              tags:        sticker.tags || '🙂',
+              description: sticker.description || 'Stolen sticker',
+              reason:      `Stolen by ${message.author.tag}`,
+            });
+            await message.reply(`✅ Added sticker: \`${created.name}\``).catch(() => {});
+          } catch (err) {
+            logger.error(`steal: sticker create failed: ${err.message}`);
+            await message.reply(`❌ Sticker \`${sticker.name}\` failed: ${err.message}`).catch(() => {});
+          }
+        }
+      } catch (err) {
+        logger.error(`steal: fetch replied message failed: ${err.message}`);
+        await message.reply(`❌ Could not fetch the replied message: ${err.message}`).catch(() => {});
+      }
+    }
+
+    // ── Nothing to steal ─────────────────────────────────────────────────────
+    if (candidates.size === 0) {
       return message.reply(
-        '❌ Use this command by **replying** to a message that contains a custom emoji or sticker.\n' +
-        '> Right-click / long-press a message → Reply, then type `c!steal`.'
+        '❌ No custom emojis found.\n' +
+        '**Usage:**\n' +
+        '• Reply to a message containing custom emojis and type `c!steal`\n' +
+        '• Or type `c!steal` followed by the custom emojis directly\n\n' +
+        '> Note: Standard emojis like 😀 cannot be stolen — only custom server emojis like <:example:123>'
       );
     }
 
-    // ── Fetch the target message ─────────────────────────────────────────────
-    let target;
-    try {
-      target = await message.channel.messages.fetch(message.reference.messageId);
-    } catch (err) {
-      logger.error('steal: failed to fetch target message:', err.message);
-      return message.reply('❌ Could not fetch that message. Make sure I can see this channel.');
-    }
+    logger.info(`steal: ${candidates.size} emoji candidate(s) found`);
 
-    logger.info(`steal: target content = "${target.content}"`);
-    logger.info(`steal: target stickers = ${target.stickers.size}`);
-
+    // ── Process each emoji ───────────────────────────────────────────────────
     const results = [];
 
-    // ── 1. Steal custom emoji(s) from message text ───────────────────────────
-    // Matches <:name:id>  and  <a:name:id>  (animated)
-    const emojiRegex = /<(a)?:(\w{2,32}):(\d{17,20})>/g;
-    const seenIds    = new Set();
-    let match;
+    for (const { animated, name, id } of candidates.values()) {
+      const ext      = animated ? 'gif' : 'png';
+      const emojiUrl = `https://cdn.discordapp.com/emojis/${id}.${ext}?size=128&quality=lossless`;
+      logger.info(`steal: trying emoji ${name} (${id}) animated=${animated} url=${emojiUrl}`);
 
-    while ((match = emojiRegex.exec(target.content)) !== null) {
-      const animated = Boolean(match[1]);
-      const name     = match[2];
-      const id       = match[3];
-      if (seenIds.has(id)) continue;
-      seenIds.add(id);
+      // Check if this emoji already exists in the guild
+      const alreadyExists = message.guild.emojis.cache.some(e => e.id === id);
+      if (alreadyExists) {
+        results.push(`ℹ️ \`${name}\` is already in this server.`);
+        continue;
+      }
 
-      // Pass the URL directly — discord.js resolves it internally
-      const ext        = animated ? 'gif' : 'png';
-      const emojiUrl   = `https://cdn.discordapp.com/emojis/${id}.${ext}?size=128&quality=lossless`;
+      // Try URL first, then buffer fallback
+      let created = null;
+      let lastErr  = null;
 
+      // Attempt 1: pass URL directly
       try {
-        const created = await message.guild.emojis.create({
+        created = await message.guild.emojis.create({
           attachment: emojiUrl,
           name,
           reason: `Stolen by ${message.author.tag}`,
         });
-        results.push(`✅ Added emoji: \`${created.name}\` ${created}`);
-      } catch (err) {
-        // Fall back to downloading a buffer if URL approach fails
+        logger.info(`steal: ✅ emoji ${name} created via URL`);
+      } catch (err1) {
+        logger.warn(`steal: URL create failed for ${name}: ${err1.message} — trying buffer`);
+        lastErr = err1;
+
+        // Attempt 2: download buffer
         try {
-          const buf     = await fetchBuffer(emojiUrl);
-          const created = await message.guild.emojis.create({
+          const buf = await fetchBuffer(emojiUrl);
+          logger.info(`steal: buffer size for ${name} = ${buf.length} bytes`);
+          created = await message.guild.emojis.create({
             attachment: buf,
             name,
             reason: `Stolen by ${message.author.tag}`,
           });
-          results.push(`✅ Added emoji: \`${created.name}\` ${created}`);
+          logger.info(`steal: ✅ emoji ${name} created via buffer`);
         } catch (err2) {
-          results.push(`❌ Failed to add \`${name}\`: ${err2.message}`);
+          logger.error(`steal: buffer create also failed for ${name}: ${err2.message}`);
+          lastErr = err2;
         }
       }
-    }
 
-    // ── 2. Steal sticker(s) ──────────────────────────────────────────────────
-    for (const sticker of target.stickers.values()) {
-      if (sticker.guildId === message.guild.id) {
-        results.push(`ℹ️ \`${sticker.name}\` is already from this server.`);
-        continue;
-      }
-      if (!sticker.guildId) {
-        results.push(`ℹ️ \`${sticker.name}\` is a built-in sticker and cannot be copied.`);
-        continue;
-      }
-
-      const stickerUrl = sticker.url;
-      if (!stickerUrl) {
-        results.push(`❌ Could not get URL for \`${sticker.name}\`.`);
-        continue;
-      }
-
-      try {
-        const buf     = await fetchBuffer(stickerUrl);
-        const created = await message.guild.stickers.create({
-          file:        { attachment: buf, name: `${sticker.name}.png` },
-          name:        sticker.name,
-          tags:        sticker.tags || '🙂',
-          description: sticker.description || `Stolen from another server`,
-          reason:      `Stolen by ${message.author.tag}`,
-        });
-        results.push(`✅ Added sticker: \`${created.name}\``);
-      } catch (err) {
-        results.push(`❌ Failed to add sticker \`${sticker.name}\`: ${err.message}`);
+      if (created) {
+        results.push(`✅ Added ${animated ? '(animated) ' : ''}\`${created.name}\` ${created}`);
+      } else {
+        results.push(`❌ \`${name}\` — ${lastErr?.message ?? 'unknown error'}`);
       }
     }
 
-    if (results.length === 0) {
-      return message.reply(
-        '❌ No stealable content found.\n' +
-        '> The message must contain a **custom emoji** (not a standard emoji) or a **guild sticker**.'
-      );
-    }
+    // ── Send results in chunks (avoid 2000 char limit) ───────────────────────
+    if (results.length === 0) return;
 
-    await message.reply(results.join('\n'));
+    const chunks = [];
+    let current  = '';
+    for (const line of results) {
+      if ((current + '\n' + line).length > 1900) {
+        chunks.push(current);
+        current = line;
+      } else {
+        current = current ? current + '\n' + line : line;
+      }
+    }
+    if (current) chunks.push(current);
+
+    for (const chunk of chunks) {
+      await message.reply(chunk).catch(err => logger.error('steal: reply failed:', err.message));
+    }
   },
 };
 
@@ -137,20 +183,20 @@ function fetchBuffer(url, redirects = 5) {
   return new Promise((resolve, reject) => {
     if (redirects === 0) return reject(new Error('Too many redirects'));
     const lib = url.startsWith('https') ? https : http;
-    lib.get(url, { headers: { 'User-Agent': 'DiscordBot (steal-cmd, 1.0)' } }, res => {
-      // Follow redirects
+    const req = lib.get(url, { headers: { 'User-Agent': 'DiscordBot (steal, 1.0)' } }, res => {
       if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
         res.resume();
         return resolve(fetchBuffer(res.headers.location, redirects - 1));
       }
       if (res.statusCode !== 200) {
         res.resume();
-        return reject(new Error(`HTTP ${res.statusCode} for ${url}`));
+        return reject(new Error(`HTTP ${res.statusCode}`));
       }
       const chunks = [];
       res.on('data',  c  => chunks.push(c));
       res.on('end',   () => resolve(Buffer.concat(chunks)));
       res.on('error', reject);
-    }).on('error', reject);
+    });
+    req.on('error', reject);
   });
 }
