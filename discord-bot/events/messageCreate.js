@@ -27,13 +27,27 @@ module.exports = {
     }
 
     // ── Prefix commands ───────────────────────────────────────────────────────
-    if (!message.content.toLowerCase().startsWith(PREFIX)) return;
+    const content = message.content;
 
-    const args        = message.content.slice(PREFIX.length).trim().split(/\s+/);
+    // Debug: log if message content is empty (intent issue)
+    if (!content && message.content === '') {
+      logger.warn(`Empty message content from ${message.author.tag} — MessageContent intent may not be active.`);
+    }
+
+    if (!content.toLowerCase().startsWith(PREFIX)) return;
+
+    logger.info(`Prefix command received: "${content}" from ${message.author.tag}`);
+
+    const args        = content.slice(PREFIX.length).trim().split(/\s+/);
     const commandName = args.shift().toLowerCase();
 
+    logger.info(`Command name parsed: "${commandName}"`);
+
     const command = client.prefixCmds.get(commandName);
-    if (!command) return;
+    if (!command) {
+      logger.warn(`Unknown prefix command: "${commandName}"`);
+      return;
+    }
 
     try {
       await command.run(message, args, client);
