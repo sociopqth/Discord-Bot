@@ -5,6 +5,7 @@
 const { PermissionFlagsBits } = require('discord.js');
 const https = require('https');
 const http  = require('http');
+const { logger } = require('../../utils/logger');
 
 module.exports = {
   prefix: 'steal',
@@ -26,6 +27,7 @@ module.exports = {
     }
 
     // ── Must be used as a reply ──────────────────────────────────────────────
+    logger.info(`steal: reference = ${JSON.stringify(message.reference)}`);
     if (!message.reference?.messageId) {
       return message.reply(
         '❌ Use this command by **replying** to a message that contains a custom emoji or sticker.\n' +
@@ -37,9 +39,13 @@ module.exports = {
     let target;
     try {
       target = await message.channel.messages.fetch(message.reference.messageId);
-    } catch {
+    } catch (err) {
+      logger.error('steal: failed to fetch target message:', err.message);
       return message.reply('❌ Could not fetch that message. Make sure I can see this channel.');
     }
+
+    logger.info(`steal: target content = "${target.content}"`);
+    logger.info(`steal: target stickers = ${target.stickers.size}`);
 
     const results = [];
 
