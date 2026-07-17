@@ -7,13 +7,10 @@
  *
  * Both modes can be combined (reply + emojis in command).
  */
-const { PermissionFlagsBits, REST, Routes } = require('discord.js');
+const { PermissionFlagsBits, Routes } = require('discord.js');
 const https = require('https');
 const http  = require('http');
 const { logger } = require('../../utils/logger');
-
-// Use the REST API directly — guild.emojis.create() hangs on Replit
-const rest = new REST().setToken(process.env.DISCORD_TOKEN);
 
 // Custom emoji pattern: <:name:id> or <a:name:id>
 const EMOJI_RE = /<(a)?:(\w{2,32}):(\d{15,20})>/g;
@@ -158,18 +155,36 @@ module.exports = {
         const buf = await withTimeout(fetchBuffer(emojiUrl), 15_000, `Download timed out for ${name}`);
         logger.info(`steal: buffer ${name} = ${buf.length} bytes`);
 
-        // Convert to base64 data URI and POST directly to the REST API
-        // (guild.emojis.create() hangs indefinitely on this host)
+        // POST to Discord API using native fetch with a hard 20s timeout
         const mime    = animated ? 'image/gif' : 'image/png';
         const dataUri = `data:${mime};base64,${buf.toString('base64')}`;
 
-        const created = await rest.post(Routes.guildEmojis(message.guild.id), {
-          body:   { name, image: dataUri },
-          reason: `Stolen by ${message.author.tag}`,
-        });
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 20_000);
 
-        logger.info(`steal: ✅ created ${name} id=${created.id}`);
-        results.push(`✅ \`${created.name}\` <${animated ? 'a' : ''}:${created.name}:${created.id}>`);
+        let res;
+        try {
+          res = await fetch(`https://discord.com/api/v10/guilds/${message.guild.id}/emojis`, {
+            method:  'POST',
+            signal:  controller.signal,
+            headers: {
+              'Authorization':     `Bot ${process.env.DISCORD_TOKEN}`,
+              'Content-Type':      'application/json',
+              'X-Audit-Log-Reason': encodeURIComponent(`Stolen by ${message.author.tag}`),
+            },
+            body: JSON.stringify({ name, image: dataUri }),
+          });
+        } finally {
+          clearTimeout(timer);
+        }
+
+        const json = await res.json();
+        logger.info(`steal: API response ${res.status}: ${JSON.stringify(json).slice(0, 200)}`);
+
+        if (!res.ok) throw new Error(`Discord API ${res.status}: ${json.message ?? JSON.stringify(json)}`);
+
+        logger.info(`steal: ✅ created ${name} id=${json.id}`);
+        results.push(`✅ \`${json.name}\` <${animated ? 'a' : ''}:${json.name}:${json.id}>`);
       } catch (err) {
         logger.error(`steal: failed ${name}: ${err.message}`);
         results.push(`❌ \`${name}\` — ${err.message}`);
