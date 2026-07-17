@@ -46,3 +46,11 @@ CLIENT_ID = "1527060248584519780"
 MOD_LOG_CHANNEL = "mod-logs"
 TICKET_CATEGORY = "Tickets"
 WELCOME_CHANNEL = "welcome"
+
+[[ports]]
+localPort = 8080
+externalPort = 8080
+
+[[ports]]
+localPort = 8081
+externalPort = 80
