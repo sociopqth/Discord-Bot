@@ -1,6 +1,15 @@
 require('dotenv').config();
-const fs = require('fs');
+const fs   = require('fs');
 const path = require('path');
+const http = require('http');
+
+// ── Health-check server (only in deployed/artifact context where PORT is set) ─
+if (process.env.PORT) {
+  http.createServer((req, res) => {
+    res.writeHead(req.url === '/healthz' ? 200 : 404);
+    res.end(req.url === '/healthz' ? 'OK' : 'Not Found');
+  }).listen(Number(process.env.PORT));
+}
 const { Client, GatewayIntentBits, Partials, Collection } = require('discord.js');
 const { logger } = require('./utils/logger');
 
